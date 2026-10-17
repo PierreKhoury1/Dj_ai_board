@@ -1,6 +1,6 @@
 # DJ AI Board — Architecture Plan
 
-Status: draft v0.2 (design discussion, nothing built yet)
+Status: draft v0.3 (design discussion, nothing built yet)
 
 ## Decision log
 
@@ -8,7 +8,8 @@ Status: draft v0.2 (design discussion, nothing built yet)
 |---|---|---|
 | 2026-10-17 | This is a **product**, not a one-off. | Custom carrier board is mandatory. BOM cost, lifecycle, licensing, compliance and manufacturing enter the design from day one. |
 | 2026-10-17 | Working assumption: **file-based library, no live line-in** in v1. | High-accuracy stem separation of a live stream is not practical. Revisit for v2 only with a lighter, causal model. |
-| 2026-10-17 | Working assumption: **separation runs on the unit** (offline-capable), cloud is an optional accelerator later. | Compute module must run heavy separation models in a wait-a-minute-or-two timeframe. DJs work in venues without reliable internet; this is the "Pro" positioning. |
+| 2026-10-17 | **No Jetson.** Compute module is the **Raspberry Pi Compute Module 5**. | Module cost drops from $399 to $105-170 (1K-unit list prices, July 2026). Fanless, simpler 4-6 layer carrier, open KiCad reference design, pre-certified wireless on-module. |
+| 2026-10-17 | **Heavy separation runs off the unit**, in a companion app on the user's laptop/phone (optionally a cloud service). The unit keeps a light on-device fallback. | CM5 CPU cannot run RoFormer/Demucs-class models in acceptable time. DJs already prep libraries on a laptop (rekordbox/Serato model), so this matches existing workflow. Accuracy is unchanged because separation was never real-time. |
 
 ## Goal
 
@@ -29,8 +30,10 @@ look at several seconds of context on both sides). So:
   are cached to disk. This is the same UX as Rekordbox/Serato "analysis".
 - The **real-time path is cheap**: 8 stems (4 per deck) x (time-stretch + EQ +
   gain automation) + sum + limiter. Any modern ARM SoC does this easily.
-- Consequence: the board's compute is sized by "how long will the user wait
-  after loading a new track", not by real-time constraints.
+- Consequence: the heavy models can run wherever there is a GPU or NPU (the
+  user's laptop or phone, or a server), and the unit itself only needs
+  enough compute for playback, mixing and UI. That is what makes a CM5
+  viable.
 
 ## Accuracy targets
 
@@ -50,46 +53,70 @@ Ensembles buy accuracy at multiplied compute.
 
 ## Compute options
 
+Prices are 1K-unit list prices from the vendors as of July 2026 (NVIDIA raised
+all Jetson prices that month; Raspberry Pi raised CM5 prices with DRAM costs).
 Numbers marked "est." are estimates to be measured in Phase 1, not benchmarks.
 
-| Option | On-device separation (4-min track) | Real-time 8-stem mix | Power | Carrier PCB difficulty | Module cost (rough) | Verdict |
-|---|---|---|---|---|---|---|
-| **NVIDIA Jetson Orin Nano 8GB module (Super mode, 67 INT8 TOPS)** | htdemucs FP16: ~1-3 min est.; RoFormer: several min est. | easy | 7-25 W, needs fan | high (260-pin SO-DIMM, PCIe/DP/USB3 impedance-controlled routing) but reference designs exist | single-unit resellers list $500-770; volume pricing only via NVIDIA distributors, expect well under that | **Recommended for the on-device "Pro" product** |
-| Raspberry Pi CM5 | tens of minutes est. CPU-only | easy | 5-10 W, passive OK | medium | ~$45-95 | For a cheaper tier where separation runs in a companion app or cloud |
-| RK3588 NPU / Hailo-8 / Hailo-10H / Qualcomm QCS8550 | unproven for STFT + long-sequence transformers; Qualcomm is viable at scale but is a large porting effort | easy | low | medium | varies | Not for v1. Candidate for a cost-down v2 once the model is frozen. |
-| MCU / audio DSP (STM32H7, SHARC) | impossible | fine | very low | low | low | Rule out for separation; right part for the **control surface** |
+| | Jetson Orin Nano 8GB module | **Raspberry Pi CM5 (chosen)** | Rockchip RK3588 module (e.g. Radxa CM5) |
+|---|---|---|---|
+| Module price | **$399** (4GB: $349). Single units $500-770 at resellers. | 4GB Lite wireless **$105**; 8GB Lite wireless **$170**; 8GB + 32GB eMMC wireless $205 (full table below) | launch pricing $75-89 for 8GB; 2026 pricing unverified |
+| Storage needed on carrier | NVMe mandatory (no eMMC) | NVMe or eMMC variant; NVMe recommended for the library | eMMC on module |
+| Cooling | fan + heatsink, 15-25 W | passive, 5-8 W | passive/small fan |
+| Carrier board | 6-8 layer, 260-pin SO-DIMM, PCIe/DP/USB3 routing | 4-6 layer, 2x 100-pin Hirose, open KiCad IO-board reference from Raspberry Pi | 4-6 layer, CM4-style connectors |
+| Wireless certification | separate M.2 module needed | pre-certified module on the CM5 itself (+$5) | varies |
+| Audio bring-up | custom device-tree work | existing I2S DAC overlays (HiFiBerry-class) work out of the box | moderate |
+| On-device heavy separation (4-min track) | ~1-3 min est. | 20-60 min est. CPU-only | somewhat faster CPU; NPU unproven for these models |
+| Software ecosystem / longevity | JetPack; NVIDIA lifecycle commitment | Raspberry Pi OS; **in production until at least January 2036** | vendor BSPs, weaker long-term support |
+| Approx. compute-related BOM delta vs CM5 | **+$330-400** (module, NVMe, fan, bigger PSU, harder board) | baseline | roughly CM5-class |
+
+CM5 price list (Raspberry Pi product brief, July 2026, list prices):
+
+| RAM | Lite (no eMMC) | 16GB eMMC | 32GB eMMC | 64GB eMMC |
+|---|---|---|---|---|
+| 2GB | $67.50 | $92.50 | $102.50 | $102.50 |
+| 4GB | $100 | $125 | $135 | $135 |
+| 8GB | $165 | $190 | $200 | $200 |
+| 16GB | $295 | $320 | $330 | $330 |
+
+Wireless adds $5 to each (e.g. 4GB Lite wireless $105, 8GB Lite wireless $170).
+
+Recommendation: **CM5 8GB Lite wireless ($170)** for development and the first
+build; decide after Phase 1 whether the 4GB part ($105) is enough for the
+playback/mix workload plus UI, which it probably is if the on-device fallback
+separator is a light model.
 
 Important framing: the "PCB" you design is a **carrier board around a compute
-module**, plus audio and controls. Nobody should route an SoC + LPDDR from
-scratch for this, at any volume a new product will see.
+module**, plus audio and controls. Start from Raspberry Pi's open CM5 IO Board
+KiCad files.
 
-Lifecycle: NVIDIA publishes multi-year availability commitments for Jetson
-Orin modules and Raspberry Pi does the same for CM5. Get the current end-of-
-life date in writing from the distributor before freezing the design.
+What dropping the Jetson costs you: heavy separation cannot happen on the box.
+That moves the "super accurate" separation into a companion app (and/or a cloud
+service) and adds a second codebase to build and maintain. It does not reduce
+separation accuracy, because the heavy models were always going to run at
+import time, not during the mix.
 
 ## Product implications
 
-### Positioning and rough BOM (Pro unit, low hundreds of units)
+### Positioning and rough BOM (CM5 unit, low hundreds of units)
 
 | Item | Rough cost |
 |---|---|
-| Jetson Orin Nano 8GB module | volume quote needed; budget $250-350 |
-| 512 GB NVMe | ~$40 |
-| Carrier PCB (6-8 layer) + assembly | $80-150 |
+| CM5 8GB Lite wireless (or 4GB, $105) | $170 |
+| 512 GB NVMe (boot + stem library) | ~$40 |
+| Carrier PCB (4-6 layer) + assembly | $50-100 |
 | DAC + analog output stage + headphone amp | ~$25 |
-| 7" touchscreen | $50-80 |
+| 7" touchscreen (DSI) | $50-80 |
 | Faders, encoders, buttons, LEDs, RP2040 | $40-80 |
-| Pre-certified Wi-Fi/BT module | ~$15 |
-| Heatsink + fan | ~$15 |
+| Passive heatsink | ~$5 |
 | Enclosure (low volume) | $60-150 |
 | External certified PSU | ~$15 |
-| **Total** | **~$600-900** |
+| **Total** | **~$450-650** |
 
-At the usual 2.5-3.5x hardware multiplier that puts retail in the
-$1,500-2,500 range, which is normal for the DJ market (pro media players and
-standalone controllers sit at $1,500-2,700). The accuracy story must justify
-the price against Engine OS / rekordbox gear that already ships lighter
-on-device stems.
+For comparison the Jetson version of the same unit came out at roughly
+$750-1,000 after NVIDIA's July 2026 price increase. At a 2.5-3.5x hardware
+multiplier the CM5 unit lands in the $1,000-1,800 retail band, with room to
+target $999-1,499. The companion app is the extra engineering cost that buys
+that saving.
 
 ### Licensing audit for commercial use (verified 2026-10-17)
 
@@ -114,22 +141,25 @@ on-device stems.
 ### Compliance
 
 - EMC: FCC Part 15 Class B, CE (EN 55032 / 55035), UKCA. A board carrying
-  PCIe, DisplayPort, USB 3 and GbE needs a disciplined stackup, ground plane
-  strategy and shielded connectors to pass. Budget a pre-compliance scan at
+  PCIe Gen2, USB 3, DSI and GbE still needs a disciplined stackup, ground
+  plane strategy and shielded connectors to pass, but it is a tamer problem
+  than a Jetson carrier. Budget a pre-compliance scan at
   DVT and $10-30k for the full pass.
-- Radio: use a **pre-certified Wi-Fi/BT module** (modular approval) so the
-  radio portion of FCC/RED is inherited.
+- Radio: the CM5 wireless variant carries a **pre-certified Wi-Fi/BT module**
+  (modular approval), so the radio portion of FCC/RED is inherited as long
+  as the carrier uses an approved antenna configuration.
 - Safety: keep mains out of the box. External certified 12-20 V adapter or
   USB-PD 20 V input.
 - RoHS, REACH, WEEE; battery-free design keeps shipping simple.
 
 ### Thermal and acoustics
 
-- The module needs 15-25 W during separation. Fan noise at a DJ booth is not
-  acceptable, so: oversized heatsink, slow large fan, and schedule separation
-  into a "quiet" power mode when the unit is idle, dropping to the 7-15 W
-  mode during performance where only the cheap real-time path runs.
-- Validate the thermal design in the real enclosure at EVT, not on the bench.
+- CM5 at 5-8 W runs fanless with a modest heatsink coupled to the enclosure.
+  No booth-noise problem. The on-device fallback separator should be
+  throttled (nice level, core limit) so it never competes with playback.
+- Validate the thermal design in the real enclosure at EVT, including a
+  worst case of fallback separation running during a performance in a hot
+  booth.
 
 ### Software as a product
 
@@ -147,20 +177,21 @@ on-device stems.
 - Test fixture: bed-of-nails for the carrier, audio loopback test (THD+N,
   channel balance), control-surface test, NVMe image flashing station,
   serialization.
-- Module and NVMe procurement lead times drive the schedule; set up the
-  NVIDIA distributor relationship before EVT.
+- CM5 stock has been tight at retailers in 2026; set up an approved
+  Raspberry Pi reseller / design-partner relationship before EVT and place
+  the pilot-run order early.
 
-## Hardware block diagram (Pro / Jetson version)
+## Hardware block diagram (CM5 version)
 
 ```
- DC 12-20 V in / USB-PD 20 V (external certified PSU)
+ DC 12-20 V in / USB-PD (external certified PSU)
         |
-   5 V / 6 A buck  ----> Jetson Orin Nano 8GB module (260-pin SO-DIMM)
+   5 V / 3 A buck  ----> Raspberry Pi CM5 8GB Lite wireless (2x 100-pin Hirose)
         |                      |  |  |  |  |
-   3.3 V / 1.8 V rails         |  |  |  |  +-- M.2 M-key NVMe (boot + stem cache; ~80-100 MB/track as FLAC)
-                               |  |  |  +----- M.2 E-key pre-certified Wi-Fi/BT module
-                               |  |  +-------- GbE (magnetics + RJ45)
-                               |  +----------- DisplayPort -> touchscreen (DP->HDMI bridge if HDMI needed)
+   3.3 V / 1.8 V rails         |  |  |  |  +-- M.2 M-key NVMe over PCIe Gen2 x1 (boot + stem library)
+                               |  |  |  +----- Wi-Fi/BT: on-module, pre-certified (antenna on carrier or external)
+                               |  |  +-------- GbE (on-module PHY; carrier adds magnetics + RJ45)
+                               |  +----------- DSI -> 7" touchscreen (HDMI available as alternative)
                                +-------------- USB 3 host x2 (USB sticks, MIDI controllers)
         I2S + MCLK (44.1 kHz family, 22.5792 MHz local oscillator)
                                |
@@ -171,65 +202,70 @@ on-device stems.
       (TPA6120 class)    (THAT1646 / DRV134, TRS/XLR)
 
  Control surface: RP2040 scans faders/pots/encoders/buttons/LEDs,
- presents as USB-HID or UART to the Jetson. Keeps timing off Linux.
+ presents as USB-HID or UART to the CM5. Keeps timing off Linux.
 
- Thermal: active heatsink required at 15-25 W. Plan the enclosure for airflow
- and fan noise; separation is scheduled in a quieter lower-power mode.
+ Thermal: passive heatsink to the enclosure, no fan.
 ```
 
 Notes:
-- The module boots from NVMe (no eMMC on Orin Nano), so the M.2 slot is mandatory.
-- Jetson 40-pin header exposes I2S on the same pins as a Pi; `jetson-io` and a
-  device-tree overlay bring up a PCM5122-style codec. Budget time for ASoC
-  bring-up; use a USB audio interface during Phase 1 to decouple it.
-- Keep the DAC in clock-master mode from a local audio-grade oscillator rather
-  than deriving MCLK from the SoC.
-- Open reference designs: NVIDIA publishes the Orin Nano dev-kit carrier design
-  files (Jetson Download Center), and Antmicro publishes an open-source KiCad
-  Jetson Orin baseboard. Start from one of these, do not start from a blank
-  schematic.
+- Lite variant has no eMMC; boot from NVMe. The NVMe also holds the stem
+  library (~80-100 MB/track as FLAC; 512 GB holds ~5,000 tracks).
+- I2S DACs with existing Raspberry Pi device-tree overlays (PCM5122 and
+  similar) bring up in minutes. Keep the DAC in clock-master mode from a
+  local audio-grade oscillator rather than deriving MCLK from the SoC.
+- Open reference design: Raspberry Pi publishes the CM5 IO Board schematics
+  and KiCad files. Start from those.
 - Audio spec targets: 24-bit / 44.1 or 48 kHz, DAC dynamic range > 110 dB,
   balanced master at +4 dBu, headphone out ~2 x 250 mW into 32 ohm.
 
 ## Software stack
 
-| Stage | Choice | Runs |
+Two deliverables: the **unit firmware** (CM5) and the **companion app**
+(macOS / Windows / iOS / Android) that does the heavy analysis.
+
+| Stage | Choice | Runs where |
 |---|---|---|
-| OS | JetPack 6 (Ubuntu 22.04, CUDA, TensorRT), A/B rootfs, secure boot | - |
-| Import / analysis | Separation: licensed SDK (AudioShake / Music.AI) or legally cleared Demucs, FP16 on CUDA. Beats/downbeats: BeatNet or in-house on the drum stem. Structure: allin1-style model (after license check) or in-house. Key: in-house. Loudness: EBU R128. | background worker, at import, quiet power mode |
-| Cache | per-track folder: 4 stems as FLAC + `analysis.json` (beat grid, downbeats, sections, key, loudness, waveform overview) | NVMe |
-| Mix planner | rule engine over `analysis.json` pairs: phrase-aligned entry/exit points, Camelot key check, energy curve matching, per-stem swap schedule (e.g. B-drums under A-vocal at phrase boundary, bass swap at downbeat, A-vocal out before B-vocal in), EQ/filter automation. Optional: an LLM picks between candidate plans / "styles" given the structured features. | at load, <1 s |
-| Real-time engine | Rust (cpal) or C++ (commercial JUCE): 8 stream readers, per-stem time-stretch (signalsmith-stretch MIT, or licensed Rubber Band R3), per-stem EQ/filter/gain automation lanes, sum, limiter, output at 44.1 kHz / 24-bit | always, performance power mode |
-| UI | touchscreen app (web view or LGPL Qt) + RP2040 control surface | - |
+| Heavy separation | Licensed on-device SDK (AudioShake Local Inference SDK ships for macOS, Windows, iOS, Android, Linux with GPU backends; Music.AI Embedded SDK) or legally cleared Demucs-class model, using the user's GPU / Apple Neural Engine. Optional cloud service for users without capable hardware. | **Companion app** (or cloud) |
+| Light on-device fallback | A small separator (Open-Unmix class, or a quantized light model) so a track dropped straight onto the unit via USB gets usable stems in a few minutes; replaced by HQ stems when the companion app syncs them. Quality to be measured; may be "drums/vocals only". | Unit, background, throttled |
+| Beats / downbeats / structure / key | BeatNet (CC BY 4.0) or in-house on the drum stem; allin1-style structure model after license check; in-house key detector | Companion app, with a CPU-feasible subset on the unit |
+| Cache / sync | per-track folder: 4 stems as FLAC + `analysis.json`. Synced over Wi-Fi (unit advertises an mDNS service) or copied via USB stick in the same layout. | Both |
+| Mix planner | rule engine over `analysis.json` pairs: phrase-aligned entry/exit points, Camelot key check, energy curve matching, per-stem swap schedule, EQ/filter automation. Optional LLM step for style selection (cloud). | Unit, at load, <1 s |
+| Real-time engine | Rust (cpal) or C++ (commercial JUCE): 8 stream readers, per-stem time-stretch (signalsmith-stretch MIT, or licensed Rubber Band R3), per-stem EQ/filter/gain automation lanes, sum, limiter, 44.1 kHz / 24-bit out over I2S | Unit, always |
+| OS / updates | Raspberry Pi OS Lite (64-bit) or Yocto; A/B rootfs with signed OTA; encrypted partition for licensed model files | Unit |
+| UI | touchscreen app (web view or LGPL Qt) + RP2040 control surface | Unit |
 
 ## Development plan
 
-Do not spin a PCB until the software pipeline is proven on a dev kit.
+Do not spin a PCB until the software pipeline is proven on dev hardware.
 
 0. **Phase 0 — product definition (parallel with Phase 1).**
    Target price and first-run volume; separation-model strategy (licensed SDK
    vs. cleared Demucs vs. in-house); request SDK quotes from AudioShake and
    Music.AI; distributor contact for module pricing and EOL date; counsel
    review of the licensing table above.
-1. **Phase 1 — pipeline on a dev kit (2-4 weeks).**
-   Jetson Orin Nano Super dev kit + a USB audio interface + NVMe.
-   Deliverables: measured separation time per model per 4-min track
-   (community checkpoints are fine here for benchmarking only); stem cache
-   format; beat grid + structure analysis; a Python prototype that renders a
-   stem-level transition between two analyzed tracks to a WAV.
+1. **Phase 1 — pipeline on dev hardware (2-4 weeks).**
+   Raspberry Pi 5 8GB (same silicon as CM5) + a USB audio interface + NVMe
+   HAT, plus a laptop for the heavy side.
+   Deliverables: the stem cache format; the companion-side analysis
+   pipeline (separation on the laptop GPU, beat grid, structure, key);
+   measured time and RAM for the light on-device fallback separator on the
+   Pi 5; a Python prototype that renders a stem-level transition between
+   two analyzed tracks to a WAV. Community checkpoints are fine here for
+   benchmarking only.
    Exit criterion: a blind listening test says the transitions are "clean"
-   on 10 varied track pairs, and separation time per track is acceptable.
+   on 10 varied track pairs, and the Pi 5 plays 8 stretched stems with
+   headroom to spare.
 2. **Phase 2 — real-time engine.** Port the renderer to Rust/C++ with
    per-stem stretch and automation lanes; play live through the USB
    interface; add the mix planner as a service.
 3. **Phase 3 — audio + control daughterboard (EVT-0).** A simple 2-4 layer
-   PCB on the dev-kit 40-pin header: I2S DAC, headphone amp, balanced outs,
-   RP2040 control surface. Validates the analog design and device-tree work
-   at low risk.
-4. **Phase 4 — custom carrier (EVT).** 6-8 layer board derived from a
-   reference carrier: 5 V high-current buck, M.2 x2, DP, USB3, GbE, plus the
-   Phase 3 audio section, in the production enclosure with the production
-   thermal solution.
+   HAT on the Pi 5 40-pin header: I2S DAC, headphone amp, balanced outs,
+   RP2040 control surface. Validates the analog design at low risk.
+4. **Phase 4 — custom CM5 carrier (EVT).** 4-6 layer board derived from the
+   CM5 IO Board reference: 5 V buck, M.2 NVMe, DSI display, USB 3, GbE,
+   antenna, plus the Phase 3 audio section, in the production enclosure
+   with passive cooling. Companion app reaches feature parity with the
+   laptop prototype on macOS and Windows; mobile follows.
 5. **Phase 5 — DVT.** Pre-compliance EMC scan, thermal/acoustic validation,
    drop and connector-cycle tests, firmware feature-complete, OTA tested.
 6. **Phase 6 — PVT and pilot run.** Test fixtures, flashing station, first
@@ -237,14 +273,18 @@ Do not spin a PCB until the software pipeline is proven on a dev kit.
 
 ## Open questions (answers change the design)
 
-1. Separation-model strategy: licensed SDK, legally cleared Demucs, or
-   in-house training? This is the biggest cost and quality lever.
-2. Target retail price and first-run volume? (Decides whether the Pro/Jetson
-   path alone is enough or a cheaper CM5 tier is needed at launch.)
-3. Confirm the two working assumptions in the decision log: file-based
-   library only in v1, and separation on the unit.
+1. Separation-model strategy for the companion app: licensed SDK, legally
+   cleared Demucs, or in-house training? This is the biggest cost and
+   quality lever. (AudioShake's SDK covering macOS/Windows/iOS/Android fits
+   the companion-app design well; get a quote.)
+2. Target retail price and first-run volume?
+3. Companion app scope at launch: desktop only (macOS + Windows), or mobile
+   too? Is a cloud separation service wanted for users without a capable
+   laptop?
+4. Confirm the working assumption of a file-based library only in v1 (no
+   live line-in).
 
-Answered: this is a product (2026-10-17).
+Answered: this is a product; no Jetson, CM5 it is (2026-10-17).
 
 ## Proposed repo layout
 
@@ -272,3 +312,6 @@ hardware/      KiCad: daughterboard (Phase 3), carrier (Phase 4)
 - AudioShake Local Inference SDK: https://developer.audioshake.ai/sdk/overview
 - Music.AI Embedded SDK: https://music.ai/embedded-ai/
 - Orin Nano 8GB module single-unit pricing examples: https://thinkrobotics.com/ar/blogs/product-reviews-buying-guides/jetson-orin-nano-price-complete-buying-guide-for-ai-robotics-development
+- NVIDIA Jetson price increase, July 2026 (Orin Nano 8GB module $299 -> $399 at 1KU): https://www.cnx-software.com/2026/07/22/nvidia-increases-the-price-of-jetson-modules-and-devkits-by-up-to-101/
+- Raspberry Pi CM5 product brief with price list and 2036 availability (July 2026): https://pip-assets.raspberrypi.com/categories/944-raspberry-pi-compute-module-5/documents/RP-008181-DS-10-cm5-product-brief.pdf
+- Radxa CM5 (RK3588S) launch pricing: https://radxa.com/blog/CM5-Official-Announcement
