@@ -1,6 +1,6 @@
 # DJ AI Board — Architecture Plan
 
-Status: draft v0.4 (design discussion, nothing built yet)
+Status: draft v0.5 (design discussion, nothing built yet)
 
 ## Decision log
 
@@ -61,6 +61,113 @@ Estimate for a signalsmith-stretch class phase-vocoder: on the order of 1
 GFLOP/s for 16 channels at 44.1 kHz, which four Cortex-A53 cores at 1 GHz
 should sustain at roughly 1-3x real time. To be measured; this number decides
 between the Zero 2 W and the CM4.
+
+## What the AI actually is
+
+There is no single "AI". The product is a pipeline of four different kinds of
+model, and only two of them are neural networks.
+
+| Stage | Kind of AI | What it produces | Where |
+|---|---|---|---|
+| 1. Stem separation | Deep neural network (band-split transformer or hybrid U-Net on spectrograms), supervised on multitrack data | 4 stems per track | companion app / cloud |
+| 2. Music analysis | Small neural nets + probabilistic decoding for beats/downbeats (CRNN/TCN + dynamic Bayesian network) and section structure (transformer); plain signal processing for key, loudness, per-bar energy, vocal activity, bass presence | `analysis.json`: beat grid, downbeats, phrases (8/16/32-bar), section labels (intro/build/drop/break/outro), key, LUFS, per-stem per-bar energy, vocal-activity per bar | companion app |
+| 3. Mix planning (the "DJ brain") | **Constraint search + scoring function**, i.e. classical AI. Rules encode DJ craft; a cost function ranks candidate transitions; priors come from analyses of real DJ mixes. Later: weights learned from user feedback. Not an LLM; an LLM cannot hear. | a transition plan: exit point in A, entry point in B, tempo curve, template, per-stem automation lanes | unit, at load |
+| 4. Rendering | DSP, not AI: phase-vocoder time-stretch, biquad EQ/filters, gain lanes, limiter | audio | unit |
+
+The planner is where "sounds good" is decided, and it is deliberately not a
+black box: every rule below is inspectable and tunable, and a failed
+transition can be traced to a rule or a bad analysis value.
+
+### The planner's rules (DJ craft, written down)
+
+1. **Phrase alignment.** Transitions start and end on phrase boundaries
+   (8/16/32 bars), downbeat to downbeat. Analyses of 20k real transitions
+   show cue points cluster at phrase boundaries; this single rule is most of
+   what separates "DJ" from "crossfade".
+2. **Tempo.** Stretch no stem beyond about +/-8% (quality cliff); prefer
+   <= 4%. Match B to A's tempo during the overlap, then drift to B's native
+   tempo after A is out. Allow half/double-time relationships.
+3. **Harmony.** Camelot neighbours (same, +/-1, relative). When keys clash,
+   overlap **drums only**; stems make a harmonically safe transition always
+   available. Allow +/-1 semitone shift of one track as a last resort.
+4. **One bass at a time.** Bass stems never overlap; the swap happens on a
+   downbeat at a phrase boundary. Two kick/bass stacks is the classic
+   amateur mud.
+5. **Vocals never collide.** Using per-bar vocal activity, B's vocal enters
+   only when A's is silent, or after A's vocal stem is out.
+6. **Energy continuity.** Match section types: A's outro or breakdown into
+   B's intro or build; land B's drop on the phrase boundary where A's energy
+   would have dropped. Never drop into an intro.
+7. **Choreography templates.** Transitions are instances of parameterised
+   templates, e.g. *drum swap* (B drums under A for 16 bars, bass swap at
+   the boundary, B tonal stems in as A's fade), *breakdown bridge* (B drums
+   enter during A's breakdown and carry into B's drop), *acapella bridge*
+   (A vocal over B instrumental for 8-16 bars, key-matched), *cut* (on a
+   downbeat, with echo-out) for incompatible pairs.
+8. **Gain staging.** Per-stem gains from analysis keep the summed output at
+   a constant short-term loudness; a transparent limiter catches peaks. A
+   high-pass on B until the bass swap; a gentle low-pass on A as it leaves.
+
+The search: for each candidate (exit phrase in A, entry phrase in B,
+template, length), compute a cost from phrase misalignment, stretch %, key
+clash on overlapping tonal stems, vocal overlap seconds, energy
+discontinuity, section compatibility and analysis confidence. Pick the
+minimum. Weights are hand-tuned first, then fitted to listening-test and
+user-skip data. This is the AutoMashUpper idea (compatibility measured after
+allowed tempo/key adjustment) plus DJ-specific constraints.
+
+### Safe fallbacks beat clever failures
+
+When the analysis is uncertain (low beat-tracker confidence, no phrase
+structure found, ambiguous key, tempo gap too large), the planner degrades to
+a safe template: drums-only overlap, a short 8-bar blend, or a clean cut on a
+downbeat. A product is judged on its worst transition, not its best.
+
+## Making it sound good: the quality plan
+
+Most "AI mixes" sound bad for three reasons, in this order: wrong beat grid
+(flams and drift), audible time-stretch and stem artefacts, and musically
+wrong transition points. The plan attacks each.
+
+1. **Play the original, not the stems, outside transitions.** Separation
+   artefacts are only audible when stems are soloed. The engine crossfades
+   from the original mixdown to the stem sum a bar before a transition and
+   back a bar after. Stems are exposed for maybe 10% of the set.
+2. **Beat grids on the drum stem, verified.** Track beats on the isolated
+   drums, snap the grid to transients, and align A to B during the overlap
+   by cross-correlating drum onset envelopes. Target < 5 ms alignment error;
+   flams become audible around 10-20 ms.
+3. **Per-stem stretch settings and a hard stretch budget.** Drums with
+   transient preservation, vocals with formant preservation, tonal stems
+   with the default. Never exceed the per-genre stretch budget; prefer a
+   different entry point over a bigger stretch.
+4. **Genre scoping.** Launch on 4/4 electronic (house, techno, DnB) where
+   structure and tempo are regular. Hip-hop and pop have irregular structure
+   and tempo and come later, with their own templates.
+5. **A test corpus with ground truth.** 200+ licensed tracks per launch genre
+   with human-verified beat grids, keys and section labels; 100+ track
+   pairs. Every analysis model is scored against it before shipping, and
+   every planner change is regression-tested on it.
+6. **Objective metrics per rendered transition**, logged in CI: alignment
+   error (ms), stretch %, overlapping-tonal-stem key distance, vocal overlap
+   seconds, loudness jump (LU), limiter gain reduction (dB), separation SDR
+   of the shipping model on a held-out set.
+7. **Blind listening tests with DJs.** MUSHRA-style: our transition vs. a
+   human DJ's vs. baselines (crossfade, Mixxx AutoDJ, djay Automix). Rate
+   smoothness, musicality, artefacts, "would you play this". Launch
+   criterion: >= 80% of in-genre transitions rated playable, and no
+   transition rated "broken". A 2018 automatic Drum-and-Bass DJ built on
+   these same MIR ingredients scored highly with genre fans in exactly this
+   kind of test, so the bar is reachable.
+8. **Feedback loop in the product.** Thumbs-down / skip on a transition is
+   logged with the plan and the analysis values; this is the training
+   signal for planner weights and the queue for analysis-bug triage.
+
+Prior art worth reading before writing the planner: Vande Veire & De Bie,
+*From raw audio to a seamless mix* (EURASIP 2018, open source, AGPL so read
+it, do not copy it); Kim et al., *A Computational Analysis of Real-World DJ
+Mixes* (ISMIR 2020, cue-point statistics from 1,557 mixes); Davies et al.,
+*AutoMashUpper* (IEEE/ACM TASLP 2014, the mashability score).
 
 ## Accuracy targets
 
@@ -365,3 +472,6 @@ hardware/      KiCad: daughterboard (Phase 3), carrier (Phase 4)
 - Raspberry Pi Zero 2 W product page ($15, in production until at least January 2030): https://www.raspberrypi.com/products/raspberry-pi-zero-2-w/
 - Raspberry Pi CM4 product brief with price list (1GB Lite $41.25, wireless $46.25; until January 2034): https://pip-assets.raspberrypi.com/categories/634-raspberry-pi-compute-module-4/documents/RP-008169-DS-8-cm4-product-brief.pdf
 - Radxa Zero 3W product brief (availability until Sept 2033): https://dl2.radxa.com/zero3/docs/hw/3w/radxa_zero_3w_product_brief.pdf
+- Vande Veire & De Bie, automated DJ system for Drum and Bass (EURASIP 2018): https://link.springer.com/article/10.1186/s13636-018-0134-8
+- Kim et al., computational analysis of real-world DJ mixes (ISMIR 2020): https://arxiv.org/abs/2008.10267
+- Davies et al., AutoMashUpper (IEEE/ACM TASLP 2014): https://staff.aist.go.jp/m.goto/PAPER/IEEETASLP201412davies.pdf
