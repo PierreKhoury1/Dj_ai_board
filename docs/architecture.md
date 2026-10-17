@@ -33,7 +33,7 @@ look at several seconds of context on both sides). So:
   gain automation) + sum + limiter. Any modern ARM SoC does this easily.
 - Consequence: the heavy models can run wherever there is a GPU or NPU (the
   user's laptop or phone, or a server), and the unit itself only needs
-  enough compute for playback, mixing and UI. That is what makes a CM5
+  enough compute for playback, mixing and UI. That is what makes a $15 board
   viable.
 
 ## The second decision that makes cheap compute possible: pre-stretch, live-mix
@@ -257,7 +257,7 @@ Notes:
 
 ## Software stack
 
-Two deliverables: the **unit firmware** (CM5) and the **companion app**
+Two deliverables: the **unit firmware** (Zero 2 W / CM4) and the **companion app**
 (macOS / Windows / iOS / Android) that does the heavy analysis.
 
 | Stage | Choice | Runs where |
